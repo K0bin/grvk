@@ -185,7 +185,7 @@ GR_RESULT GR_STDCALL grCreateImage(
         LOGW("unhandled flags 0x%X\n", pCreateInfo->flags);
     }
 
-    const VkImageCreateInfo createInfo = {
+    VkImageCreateInfo createInfo = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .pNext = NULL,
         .flags = (pCreateInfo->flags & GR_IMAGE_CREATE_VIEW_FORMAT_CHANGE ?
@@ -261,11 +261,59 @@ GR_RESULT GR_STDCALL grCreateImage(
                                                          createInfo.tiling, createInfo.usage,
                                                          createInfo.flags, &imageFormatProperties);
     if (vkRes == VK_ERROR_FORMAT_NOT_SUPPORTED) {
-        LOGW("unsupported format 0x%X for image type 0x%X, tiling 0x%X and usage 0x%X\n",
-             pCreateInfo->format, pCreateInfo->imageType, pCreateInfo->tiling, pCreateInfo->usage);
+        LOGW("unsupported format 0x%X for image type 0x%X, tiling 0x%X, usage 0x%X and flags: 0x%X\n",
+             createInfo.format, createInfo.imageType, createInfo.tiling, createInfo.usage, createInfo.flags);
+
+        if (createInfo.tiling == VK_IMAGE_TILING_LINEAR) {
+            // we're getting desperate
+            createInfo.flags &= ~VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+            createInfo.imageType = VK_IMAGE_TYPE_2D;
+            createInfo.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        }
     } else if (vkRes != VK_SUCCESS) {
         LOGE("vkGetPhysicalDeviceImageFormatProperties failed (%d)\n", vkRes);
         return getGrResult(vkRes);
+    }
+
+
+    vkRes = vki.vkGetPhysicalDeviceImageFormatProperties(grDevice->physicalDevice,
+                                                         createInfo.format, createInfo.imageType,
+                                                         createInfo.tiling, createInfo.usage,
+                                                         createInfo.flags, &imageFormatProperties);
+    if (vkRes == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+        LOGW("still unsupported format 0x%X for image type 0x%X, tiling 0x%X, usage 0x%X and flags: 0x%X\n",
+             createInfo.format, createInfo.imageType, createInfo.tiling, createInfo.usage, createInfo.flags);
+        return getGrResult(vkRes);
+    } else if (vkRes != VK_SUCCESS) {
+        LOGE("vkGetPhysicalDeviceImageFormatProperties still failed (%d)\n", vkRes);
+        return getGrResult(vkRes);
+    } else {
+        if (createInfo.extent.width > imageFormatProperties.maxExtent.width
+            || createInfo.extent.height > imageFormatProperties.maxExtent.height
+            || createInfo.extent.depth > imageFormatProperties.maxExtent.depth) {
+            LOGE("image extent %dx%dx%d exceeds max extent for format %dx%dx%d\n",
+                createInfo.extent.width, createInfo.extent.height, createInfo.extent.depth,
+                imageFormatProperties.maxExtent.width, imageFormatProperties.maxExtent.height, imageFormatProperties.maxExtent.depth);
+
+            createInfo.extent.width = min(createInfo.extent.width, imageFormatProperties.maxExtent.width);
+            createInfo.extent.height = min(createInfo.extent.height, imageFormatProperties.maxExtent.height);
+            createInfo.extent.depth = min(createInfo.extent.depth, imageFormatProperties.maxExtent.depth);
+        }
+
+        if (createInfo.mipLevels > imageFormatProperties.maxMipLevels) {
+            LOGE("image mip levels %d exceeds max mip levels for format %d\n", createInfo.mipLevels, imageFormatProperties.maxMipLevels);
+            createInfo.mipLevels = imageFormatProperties.maxMipLevels;
+        }
+
+        if (createInfo.arrayLayers > imageFormatProperties.maxArrayLayers) {
+            LOGE("image array layers %d exceeds max array layers for format %d\n", createInfo.arrayLayers, imageFormatProperties.maxArrayLayers);
+            createInfo.arrayLayers = imageFormatProperties.maxArrayLayers;
+        }
+
+        if ((imageFormatProperties.sampleCounts & createInfo.samples) == 0) {
+            LOGE("sample count 0x%X is not supported for format. Supported sample counts: 0x%X\n", createInfo.samples, imageFormatProperties.sampleCounts);
+            createInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        }
     }
 
     vkRes = VKD.vkCreateImage(grDevice->device, &createInfo, NULL, &vkImage);
